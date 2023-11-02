@@ -17,6 +17,9 @@
     "@calcom/prisma#db-up": {
       "cache": false
     },
+    "@calcom/infra#deploy-infra": {
+      "cache": false
+    },
     "@calcom/prisma#dx": {
       "cache": false,
       "dependsOn": ["@calcom/prisma#db-migrate"]
@@ -42,6 +45,10 @@
       "dependsOn": ["@calcom/prisma#dx"]
     },
     "@calcom/web#start": {
+      "cache": false,
+      "dependsOn": []
+    },
+    "@calcom/api#start": {
       "cache": false,
       "dependsOn": []
     },
@@ -100,6 +107,9 @@
       "cache": false,
       "dependsOn": ["@calcom/web#build"]
     },
+    "deploy-infra": {
+      "cache": false
+    },
     "clean": {
       "cache": false,
       "outputs": ["dist/**", "build/**"]
@@ -132,6 +142,9 @@
       "outputs": ["dist/**", "build/**"]
     },
     "start": {
+      "outputs": ["dist/**", "build/**"]
+    },
+    "docker-start-api": {
       "outputs": ["dist/**", "build/**"]
     },
     "embed-tests": {
