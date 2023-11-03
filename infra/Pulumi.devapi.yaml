@@ -1,2 +1,4 @@
 config:
   aws:region: eu-central-1
+  base:url: api.cal.dev
+  base:certificateArn: "arn:aws:acm:eu-central-1:968222268162:certificate/7cc4e3c6-ae73-44ac-9c9b-82f7e470f610"

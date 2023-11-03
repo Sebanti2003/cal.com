@@ -4,51 +4,58 @@ import * as pulumi from "@pulumi/pulumi";
 import { config } from "dotenv";
 
 const awsConfig = new pulumi.Config("aws");
+const baseConfig = new pulumi.Config("base");
 
 const env = config({ path: "./api/.env.dev" });
 
 const awsRegion = awsConfig.require("region");
+const certificateArn = baseConfig.require("certificateArn");
+const url = baseConfig.require("url");
 
-console.log("REGION", awsRegion);
+console.log("REGION", awsRegion, url, certificateArn);
 if (!awsRegion) {
   throw new Error("AWS REGION IS NOT SET");
 }
 
-const DEV_SECRETS = "dev-api";
+const SECRETS = [
+  "API_KEY_PREFIX",
+  "CALCOM_LICENSE_KEY",
+  "DATABASE_URL",
+  "DATABASE_URL_BACKUP",
+  "GITHUB_ACCESS_TOKEN",
+  "NEXT_PUBLIC_WEBAPP_URL",
+  "UPSTASH_REDIS_REST_TOKEN",
+  "UPSTASH_REDIS_REST_URL",
+  "CALENDSO_ENCRYPTION_KEY",
+  "EMAIL_FROM",
+  "EMAIL_SERVER",
+  "GOOGLE_API_CREDENTIALS",
+  "GOOGLE_LOGIN_ENABLED",
+  "NEXT_PUBLIC_SENDGRID_SENDER_NAME",
+  "NEXT_PUBLIC_STRIPE_PUBLIC_KEY",
+  "NEXT_PUBLIC_WEBSITE_URL",
+  "NEXTAUTH_COOKIE_DOMAIN",
+  "NEXTAUTH_SECRET",
+  "NEXTAUTH_URL",
+  "SENDGRID_API_KEY",
+  "SENDGRID_EMAIL",
+  "STRIPE_CLIENT_ID",
+  "STRIPE_PRIVATE_KEY",
+  "TWILIO_MESSAGING_SID",
+  "TWILIO_PHONE_NUMBER",
+  "TWILIO_SID",
+  "TWILIO_TOKEN",
+  "TWILIO_VERIFY_SID",
+  "YARN_ENABLE_IMMUTABLE_INSTALLS",
+].map((secretKey) => {
+  if (process.env.NODE_ENV === "development") {
+    return `DEV_${secretKey}`;
+  }
+  return secretKey;
+});
 
 // Get Secret
 const getSecrets = async () => {
-  const SECRETS = [
-    "API_KEY_PREFIX",
-    "CALCOM_LICENSE_KEY",
-    "DATABASE_URL",
-    "DATABASE_URL_BACKUP",
-    "GITHUB_ACCESS_TOKEN",
-    "NEXT_PUBLIC_WEBAPP_URL",
-    "UPSTASH_REDIS_REST_TOKEN",
-    "UPSTASH_REDIS_REST_URL",
-    "CALENDSO_ENCRYPTION_KEY",
-    "EMAIL_FROM",
-    "EMAIL_SERVER",
-    "GOOGLE_API_CREDENTIALS",
-    "GOOGLE_LOGIN_ENABLED",
-    "NEXT_PUBLIC_SENDGRID_SENDER_NAME",
-    "NEXT_PUBLIC_STRIPE_PUBLIC_KEY",
-    "NEXT_PUBLIC_WEBSITE_URL",
-    "NEXTAUTH_COOKIE_DOMAIN",
-    "NEXTAUTH_SECRET",
-    "NEXTAUTH_URL",
-    "SENDGRID_API_KEY",
-    "SENDGRID_EMAIL",
-    "STRIPE_CLIENT_ID",
-    "STRIPE_PRIVATE_KEY",
-    "TWILIO_MESSAGING_SID",
-    "TWILIO_PHONE_NUMBER",
-    "TWILIO_SID",
-    "TWILIO_TOKEN",
-    "TWILIO_VERIFY_SID",
-    "YARN_ENABLE_IMMUTABLE_INSTALLS",
-  ];
   const res = [];
   for (let index = 0; index < SECRETS.length; index++) {
     try {
@@ -56,7 +63,7 @@ const getSecrets = async () => {
       const secret = await aws.secretsmanager.getSecret({ name: secretKey });
       if (secret && secret.arn) res.push({ name: secretKey, valueFrom: secret.arn });
     } catch (err) {
-      console.info("Secret not found");
+      console.info("Secret not found:", SECRETS[index]);
     }
   }
   return res;
@@ -131,7 +138,7 @@ const main = (secrets: { name: string; valueFrom: string }[]) => {
       {
         port: 443,
         protocol: "HTTPS",
-        certificateArn: `arn:aws:acm:${awsRegion}:968222268162:certificate/7cc4e3c6-ae73-44ac-9c9b-82f7e470f610`,
+        certificateArn: certificateArn,
       },
     ],
   });
@@ -232,23 +239,6 @@ const main = (secrets: { name: string; valueFrom: string }[]) => {
     },
   });
 
-  // Get Route53 Hosted Zone Id
-  const zoneId = aws.route53.getZone({ name: "api.cloud.cal.dev" }).then((zone) => zone.zoneId);
-
-  // Create A Record to Redirect Url to LoadBalancer
-  new aws.route53.Record("testapi", {
-    name: "api.cloud.cal.dev",
-    type: "A",
-    zoneId: zoneId,
-    aliases: [
-      {
-        name: lb.loadBalancer.dnsName,
-        zoneId: lb.loadBalancer.zoneId,
-        evaluateTargetHealth: true,
-      },
-    ],
-  });
-
   // Create Autoscaling for the ECS service, Scale when CPU > 75%
   const autoscaling = new aws.appautoscaling.Policy("autoscaling", {
     serviceNamespace: "ecs",
@@ -273,7 +263,7 @@ const main = (secrets: { name: string; valueFrom: string }[]) => {
     serviceNamespace: "ecs",
   });
 
-  return "api.cloud.cal.dev";
+  return url;
 };
 
 getSecrets().then((secrets) => {
