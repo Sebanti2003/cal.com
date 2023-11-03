@@ -4,8 +4,6 @@
 ARG NODE_VERSION=20.7.0
 FROM node:${NODE_VERSION}-slim as base
 
-LABEL fly_launch_runtime="Next.js/Prisma"
-
 # Next.js/Prisma app lives here
 WORKDIR /app
 

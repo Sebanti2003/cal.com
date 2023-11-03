@@ -1,13 +1,18 @@
 import * as aws from "@pulumi/aws";
+import type { LogGroup } from "@pulumi/aws/cloudwatch";
+import type { SecurityGroup } from "@pulumi/aws/ec2";
 import * as awsx from "@pulumi/awsx";
+import type { Cluster } from "@pulumi/awsx/classic/ecs/cluster";
+import type { Vpc } from "@pulumi/awsx/ec2/vpc";
+import type { Image, Repository } from "@pulumi/awsx/ecr";
+import type { FargateService } from "@pulumi/awsx/ecs";
+import type { ApplicationLoadBalancer } from "@pulumi/awsx/lb";
 import * as pulumi from "@pulumi/pulumi";
-import { config } from "dotenv";
+
+type SecretType = { name: string; valueFrom: string };
 
 const awsConfig = new pulumi.Config("aws");
 const baseConfig = new pulumi.Config("base");
-
-const env = config({ path: "./api/.env.dev" });
-
 const awsRegion = awsConfig.require("region");
 const certificateArn = baseConfig.require("certificateArn");
 const url = baseConfig.require("url");
@@ -54,8 +59,8 @@ const SECRETS = [
   return secretKey;
 });
 
-// Get Secret
-const getSecrets = async () => {
+// Get Secrets
+const getAwsSecrets = async () => {
   const res = [];
   for (let index = 0; index < SECRETS.length; index++) {
     try {
@@ -69,15 +74,18 @@ const getSecrets = async () => {
   return res;
 };
 
-const main = (secrets: { name: string; valueFrom: string }[]) => {
+const createVpc = (name: string) => {
   // Create VPC
-  const vpc = new awsx.ec2.Vpc("cal", {
+  const vpc = new awsx.ec2.Vpc(name, {
     cidrBlock: "10.0.0.0/16",
   });
+  return vpc;
+};
 
+const createHttpsSecurityGroup = (name: string, vpcId: Vpc["vpcId"]) => {
   // Create Security Group
-  const sg = new aws.ec2.SecurityGroup("webserver-sg", {
-    vpcId: vpc.vpcId,
+  const sg = new aws.ec2.SecurityGroup(name, {
+    vpcId: vpcId,
     ingress: [
       {
         description: "allow HTTP access from anywhere",
@@ -103,22 +111,27 @@ const main = (secrets: { name: string; valueFrom: string }[]) => {
       },
     ],
   });
-  // Create ECR Image Repository
-  const repository = new awsx.ecr.Repository("repository", {});
-  // Create Docker Image of Api and Store in Repo
-  const image = new awsx.ecr.Image("cal-api-image", {
-    repositoryUrl: repository.url,
-    dockerfile: "./api/Dockerfile",
-    path: "../",
+  return sg;
+};
+
+const createLog = () => {
+  // Create Cloudwatch LogGroup and Stream
+  const logGroup = new aws.cloudwatch.LogGroup("cal-api-log-group");
+  const logStream = new aws.cloudwatch.LogStream("cal-api-log-stream", {
+    logGroupName: logGroup.name,
   });
+  return { logGroup, logStream };
+};
 
-  // Create ECS cluster
-  const cluster = new awsx.classic.ecs.Cluster("cluster", {});
-
+const createAppLoadBalancer = (
+  name: string,
+  publicSubnetIds: Vpc["publicSubnetIds"],
+  securityGroupId: SecurityGroup["id"]
+) => {
   // Create Application Load Balancer
-  const lb = new awsx.lb.ApplicationLoadBalancer("lb", {
-    securityGroups: [sg.id],
-    subnetIds: vpc.publicSubnetIds,
+  const lb = new awsx.lb.ApplicationLoadBalancer(name, {
+    securityGroups: [securityGroupId],
+    subnetIds: publicSubnetIds,
     defaultTargetGroup: { healthCheck: { matcher: "200-299" }, port: 80, protocol: "HTTP" },
     listeners: [
       {
@@ -142,13 +155,60 @@ const main = (secrets: { name: string; valueFrom: string }[]) => {
       },
     ],
   });
+  return lb;
+};
 
-  // Create Cloudwatch LogGroup and Stream
-  const logGroup = new aws.cloudwatch.LogGroup("cal-api-log-group");
-  const logStream = new aws.cloudwatch.LogStream("cal-api-log-stream", {
-    logGroupName: logGroup.name,
+const createDockerImagesRepo = (name: string) => {
+  // Create ECR Image Repository
+  const repository = new awsx.ecr.Repository(name, {});
+  return repository;
+};
+
+const createDockerImage = ({
+  imageName,
+  repoUrl,
+  dockerFilePath,
+  buildContextPath,
+}: {
+  imageName: string;
+  repoUrl: Repository["url"];
+  dockerFilePath: string;
+  buildContextPath: string;
+}) => {
+  // Create Docker Image of Api and Store in Repo
+  const image = new awsx.ecr.Image(imageName, {
+    repositoryUrl: repoUrl,
+    dockerfile: dockerFilePath,
+    path: buildContextPath,
   });
+  return image;
+};
 
+const createElasticContainerCluster = (clusterName: string) => {
+  // Create ECS cluster
+  const cluster = new awsx.classic.ecs.Cluster(clusterName, {});
+  return cluster;
+};
+
+const createFargateServiceWithSecrets = ({
+  secrets,
+  imageUri,
+  logGroupName,
+  loadBalancerTargetGroup,
+  ecsClusterArn,
+  privateSubnetIds,
+  securityGroupId,
+  serviceName,
+}: {
+  secrets: SecretType[];
+  imageUri: Image["imageUri"];
+  logGroupName: LogGroup["name"];
+  loadBalancerTargetGroup: ApplicationLoadBalancer["defaultTargetGroup"];
+  ecsClusterArn: Cluster["cluster"]["arn"];
+  privateSubnetIds: Vpc["privateSubnetIds"];
+  securityGroupId: SecurityGroup["id"];
+  serviceName: string;
+}) => {
   // Policy For Secrets
   const secretsManagerAccessPolicy = new aws.iam.Policy("fargate-secrets-policy", {
     policy: {
@@ -199,10 +259,10 @@ const main = (secrets: { name: string; valueFrom: string }[]) => {
 
   // Create Fargate Service
   const service = new awsx.ecs.FargateService("service", {
-    cluster: cluster.cluster.arn,
+    cluster: ecsClusterArn,
     networkConfiguration: {
-      subnets: vpc.privateSubnetIds,
-      securityGroups: [sg.id],
+      subnets: privateSubnetIds,
+      securityGroups: [securityGroupId],
       assignPublicIp: true,
     },
 
@@ -214,8 +274,8 @@ const main = (secrets: { name: string; valueFrom: string }[]) => {
         cpuArchitecture: "ARM64",
       },
       container: {
-        name: "test-api",
-        image: image.imageUri,
+        name: serviceName,
+        image: imageUri,
         cpu: 1024,
         memory: 2000,
         essential: true,
@@ -223,13 +283,13 @@ const main = (secrets: { name: string; valueFrom: string }[]) => {
           {
             containerPort: 80,
             hostPort: 80,
-            targetGroup: lb.defaultTargetGroup,
+            targetGroup: loadBalancerTargetGroup,
           },
         ],
         logConfiguration: {
           logDriver: "awslogs",
           options: {
-            "awslogs-group": logGroup.name,
+            "awslogs-group": logGroupName,
             "awslogs-stream-prefix": "cal-api",
             "awslogs-region": `${awsRegion}`,
           },
@@ -238,34 +298,86 @@ const main = (secrets: { name: string; valueFrom: string }[]) => {
       },
     },
   });
+  return service;
+};
 
+const createAutoScalingCpu = ({
+  ecsClusterName,
+  serviceName,
+  cpuTargetValue,
+  maxCapacity,
+  minCapacity,
+  scaleInCooldown,
+  scaleOutCooldown,
+}: {
+  ecsClusterName: Cluster["cluster"]["name"];
+  serviceName: FargateService["service"]["name"];
+  cpuTargetValue: number;
+  maxCapacity: number;
+  minCapacity: number;
+  scaleInCooldown: number;
+  scaleOutCooldown: number;
+}) => {
   // Create Autoscaling for the ECS service, Scale when CPU > 75%
   const autoscaling = new aws.appautoscaling.Policy("autoscaling", {
     serviceNamespace: "ecs",
     scalableDimension: "ecs:service:DesiredCount",
-    resourceId: pulumi.interpolate`service/${cluster.cluster.name}/${service.service.name}`,
+    resourceId: pulumi.interpolate`service/${ecsClusterName}/${serviceName}`,
     policyType: "TargetTrackingScaling",
     targetTrackingScalingPolicyConfiguration: {
-      targetValue: 75.0,
+      targetValue: cpuTargetValue,
       predefinedMetricSpecification: {
         predefinedMetricType: "ECSServiceAverageCPUUtilization",
       },
-      scaleInCooldown: 50,
-      scaleOutCooldown: 50,
+      scaleInCooldown,
+      scaleOutCooldown,
     },
   });
   // Set Min and Max Number of Tasks
   const autoscalingTarget = new aws.appautoscaling.Target("my-scaling-target", {
-    maxCapacity: 4, // maximum number of tasks
-    minCapacity: 1, // minimum number of tasks
-    resourceId: pulumi.interpolate`service/${cluster.cluster.name}/${service.service.name}`,
+    maxCapacity: maxCapacity, // maximum number of tasks
+    minCapacity: minCapacity, // minimum number of tasks
+    resourceId: pulumi.interpolate`service/${ecsClusterName}/${serviceName}`,
     scalableDimension: "ecs:service:DesiredCount",
     serviceNamespace: "ecs",
   });
 
-  return url;
+  return { autoscaling, autoscalingTarget };
 };
 
-getSecrets().then((secrets) => {
-  main(secrets);
-});
+const main = async () => {
+  const awsSecrets = await getAwsSecrets();
+  const vpc = createVpc("cal-api-vpc");
+  const httpsSg = createHttpsSecurityGroup("cal-api-sg", vpc.vpcId);
+  const apiAlb = createAppLoadBalancer("cal-api-lb", vpc.publicSubnetIds, httpsSg.id);
+  const { logGroup } = createLog();
+  const repo = createDockerImagesRepo("cal-api-repo");
+  const apiImage = createDockerImage({
+    imageName: "cal-api-image",
+    repoUrl: repo.url,
+    dockerFilePath: "./api/Dockerfile",
+    buildContextPath: "../",
+  });
+  const ecsCluster = createElasticContainerCluster("cal-api-cluster");
+  const apiService = createFargateServiceWithSecrets({
+    privateSubnetIds: vpc.privateSubnetIds,
+    securityGroupId: httpsSg.id,
+    secrets: awsSecrets,
+    imageUri: apiImage.imageUri,
+    logGroupName: logGroup.name,
+    loadBalancerTargetGroup: apiAlb.defaultTargetGroup,
+    ecsClusterArn: ecsCluster.cluster.arn,
+    serviceName: process.env.NODE_ENV === "development" ? "cal-api-fargate-dev" : "cal-api-fargate",
+  });
+  const _ = createAutoScalingCpu({
+    ecsClusterName: ecsCluster.cluster.name,
+    serviceName: apiService.service.name,
+    minCapacity: 1,
+    maxCapacity: 5,
+    cpuTargetValue: 75,
+    scaleInCooldown: 60,
+    scaleOutCooldown: 120,
+  });
+};
+
+main();
